@@ -7,20 +7,26 @@ Srcipt is generating config.ini file where it suppose to be filled
 paths to the folder where machines are outputing the results.
 """
 
-from datetime import datetime
-import csv
 import configparser
-import pathlib
+import csv
 import os
-import time
+import pathlib
 import sys
+import time
+from datetime import datetime
+
+import requests
+
+# Parts ID registers on a specific station
+R_MARPOSS_CHECKED_ID = 6
+R_KOGAME_CHECKED_ID = 5
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parent
 RESULT_FILE_NAME = "result.csv"
 CONFIG_FILE_NAME = "config.ini"
 CONFIG_PATH = SCRIPT_PATH / CONFIG_FILE_NAME
 RESULT_PATH = SCRIPT_PATH / RESULT_FILE_NAME
-DEFAULT_CONFIG = {"marposs": "", "kogame": ""}
+DEFAULT_CONFIG = {"marposs": "", "kogame": "", "ip": "http://192.168.88.2"}
 
 config = configparser.ConfigParser()
 
@@ -40,19 +46,22 @@ def create_raw_config_file() -> None:
     sys.exit()
 
 
-def get_config_paths() -> tuple:
+def get_config() -> tuple:
     """
     Read the config file and return the values for marposs and kogame.
     If the file doesn't exist, create a raw file and close the program.
     """
     marposs_config = ""
     kogame_config = ""
+    ip = ""
     # Try to read config file. If file do not exists -> Create raw file and close the program
     try:
         with open(CONFIG_PATH, "r", encoding="UTF-8"):
             config.read(CONFIG_PATH)
         marposs_config = config.get("Settings", "marposs")
         kogame_config = config.get("Settings", "kogame")
+        ip = config.get("Settings", "ip")
+        ip += "/MD/NUMREG.VA"
     except FileNotFoundError:
         print(">>> config.ini not found")
         create_raw_config_file()
@@ -60,7 +69,7 @@ def get_config_paths() -> tuple:
         raise ValueError("Error in config.ini")
     if not marposs_config or not kogame_config:
         raise ValueError("Missing path in config.ini")
-    return marposs_config, kogame_config
+    return marposs_config, kogame_config, ip
 
 
 def validate_paths(*paths: str) -> None:
@@ -77,18 +86,58 @@ def validate_paths(*paths: str) -> None:
             raise ValueError(f"Could not find path {path}")
 
 
+def validate_ip(ip: str):
+    if not requests.get(url=ip).status_code == 200:
+        raise requests.ConnectionError(f"Cannot connect to ip {ip}")
+
+
+def get_all_registers() -> list:
+    path = SCRIPT_PATH / "registers.txt"
+    with open(path) as file:
+        content = file.read()
+    # content = str(requests.get(url=IP).content)
+    content = content[content.find("OF Numeric Reg") :]
+    content = (
+        content.replace("\\r", "")
+        .replace("\\'\\'", "")
+        .replace(" ", "")
+        .replace("\\'", "'")
+    )
+    content = content.split("\\n")
+
+    return content[:201]
+
+
+def get_stations_ID() -> tuple:
+    stations_ID: list = []
+    R_IDs = (R_MARPOSS_CHECKED_ID, R_KOGAME_CHECKED_ID)
+    registers = get_all_registers()
+    for station_ID in R_IDs:
+        unformatted = registers[station_ID]
+        if "'" in unformatted:
+            value = int(unformatted[unformatted.rfind("=") + 1 : unformatted.find("'")])
+        else:
+            value = int(unformatted[unformatted.rfind("=") + 1 :])
+        stations_ID.append(value)
+    return stations_ID
+
+
 def get_recently_changed_files(path: str) -> tuple:
     """
     Get the recently modified file
     :param: path:
     :return: file path, modification time
     """
-    recent_file = max(
-        [os.path.join(path, f) for f in os.listdir(path)], key=os.path.getmtime
-    )
-    recent_file_mod_time = datetime.fromtimestamp(os.path.getmtime(recent_file))
-    # recent_file_mod_time = recent_file_mod_time.strftime("%Y-%m-%d %H:%M:%S")
-    return recent_file, recent_file_mod_time
+    recent_file = None
+
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            file_path = os.path.join(dirpath, f)
+            mod_time = os.path.getmtime(file_path)
+            if recent_file is None or mod_time > os.path.getmtime(recent_file):
+                recent_file = file_path
+
+    return recent_file
 
 
 def get_data(file_path: str) -> str:
@@ -134,43 +183,47 @@ def save_results_to_csv(res_line: str) -> None:
 
 
 if __name__ == "__main__":
-    MARPOSS_PATH, KOGAME_PATH = get_config_paths()
+    marposs_values = {}
+    kogame_values = {}
+    MARPOSS_PATH, KOGAME_PATH, IP = get_config()
     validate_paths(MARPOSS_PATH, KOGAME_PATH)
-    marposs_latest_file = get_recently_changed_files(MARPOSS_PATH)
-    kogame_latest_file = get_recently_changed_files(KOGAME_PATH)
+    # validate_ip(ip=IP)
+    last_marposs_id = 0
+    last_kogame_id = 0
+    while last_marposs_id == 0 and last_kogame_id == 0:
+        last_marposs_id, last_kogame_id = get_stations_ID()
+
     # MAIN LOOP
     print(">>> Starting to gather results >>>")
     while True:
-        # MARPOSS LOOP
-        while True:
-            (marposs_result_file, marposs_result_file_mod) = get_recently_changed_files(
-                MARPOSS_PATH
+        marposs_id, kogame_id = get_stations_ID()
+
+        # Check for Marposs ID change
+        if marposs_id != last_marposs_id and marposs_id != 0:
+            marposs_latest_file = get_recently_changed_files(MARPOSS_PATH)
+            marposs_result = get_data(marposs_latest_file)
+            marposs_values[marposs_id] = marposs_result
+            last_marposs_id = marposs_id
+
+        # Check for Kogame ID change
+        if kogame_id != last_kogame_id and kogame_id != 0:
+            kogame_latest_file = get_recently_changed_files(KOGAME_PATH)
+            kogame_result = get_data(kogame_latest_file)
+            kogame_values[kogame_id] = kogame_result
+            last_kogame_id = kogame_id
+        if kogame_id in marposs_values:
+            result_line = (
+                kogame_values.pop(kogame_id) + ";" + marposs_values.pop(kogame_id)
             )
-
-            if marposs_result_file_mod > marposs_latest_file[1]:
-                marposs_result = get_data(marposs_result_file)
-                marposs_latest_file = (marposs_result_file, marposs_result_file_mod)
-                break
-
-            time.sleep(5)
-
-        # KOGAME LOOP
-        while True:
-            (kogame_result_file, kogame_result_file_mod) = get_recently_changed_files(
-                KOGAME_PATH
+            result_line = (
+                result_line.replace(",", ";").replace(".", ",")
+                + ";"
+                + os.path.basename(kogame_latest_file)
+                + ";"
+                + os.path.basename(marposs_latest_file)
             )
-
-            if kogame_result_file_mod > marposs_latest_file[1]:
-                kogame_result = get_data(kogame_result_file)
-                kogame_latest_file = (kogame_result_file, kogame_result_file_mod)
-                break
-            time.sleep(5)
-        result_line = (
-            (marposs_result.strip() + ";" + kogame_result.strip())
-            .replace(",", ";")
-            .replace(".", ",")
-        )
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        result = now + ";" + result_line
-        print(now + "\t" + "  ".join(result_line.split(";")))
-        save_results_to_csv(result)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result = now + ";" + result_line
+            print(now + "\t" + "  ".join(result_line.split(";")))
+            save_results_to_csv(result)
+        time.sleep(3)
