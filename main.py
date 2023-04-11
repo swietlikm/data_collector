@@ -92,6 +92,11 @@ def validate_ip(ip: str):
 
 
 def get_all_registers() -> list:
+    """ get all registers from the fanuc Web Server 
+
+    Returns:
+        list: all registers from the fanuc Web Server
+    """
     path = SCRIPT_PATH / "registers.txt"
     with open(path) as file:
         content = file.read()
@@ -124,18 +129,21 @@ def get_stations_ID() -> tuple:
 
 def get_recently_changed_files(path: str) -> tuple:
     """
-    Get the recently modified file
-    :param: path:
-    :return: file path, modification time
+    Get the recently modified .csv file in the specified directory and its subdirectories.
+    
+    :param path: The directory path to search for .csv files.
+    :return: A tuple containing the file path and the modification time of the recently modified .csv file,
+        or None if no .csv file is found.
     """
     recent_file = None
 
     for dirpath, _, filenames in os.walk(path):
         for f in filenames:
-            file_path = os.path.join(dirpath, f)
-            mod_time = os.path.getmtime(file_path)
-            if recent_file is None or mod_time > os.path.getmtime(recent_file):
-                recent_file = file_path
+            if f.lower().endswith('.csv'):
+                file_path = os.path.join(dirpath, f)
+                mod_time = os.path.getmtime(file_path)
+                if recent_file is None or mod_time > os.path.getmtime(recent_file):
+                    recent_file = file_path
 
     return recent_file
 
